@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # =====================================================================
-#  SMB Share Enumerator + Interactive Login Loop + Reprint List
+#  SMB Share Enumerator + smbmap Integration + Interactive Login Loop
 # =====================================================================
 
-echo "=== SMB SHARE ENUM + LOGIN SELECTOR (v11) ==="
+echo "=== SMB SHARE ENUM + LOGIN SELECTOR (v12 with smbmap) ==="
 read -p "[+] Enter target IP: " TARGET
 
 echo
@@ -21,19 +21,25 @@ AUTH=""
 
 case "$MODE" in
     1)
-        echo "[+] Using anonymous login."
+        echo "[+] Using anonymous authentication."
         AUTH="anon"
+        SMB_USER=""
+        SMB_PASS=""
         ;;
     2)
         read -p "[+] Username: " USER
         echo "[+] Using blank password for '$USER'"
         AUTH="blank"
+        SMB_USER="$USER"
+        SMB_PASS=""
         ;;
     3)
         read -p "[+] Username: " USER
         read -s -p "[+] Password: " PASS
         echo
         AUTH="full"
+        SMB_USER="$USER"
+        SMB_PASS="$PASS"
         ;;
     *)
         echo "[!] Invalid selection."
@@ -43,9 +49,9 @@ esac
 
 
 # ------------------------------------------------------------
-# ENUMERATE SHARES
+# ENUMERATE SHARES (smbclient)
 # ------------------------------------------------------------
-echo "[+] Enumerating SMB shares on //$TARGET ..."
+echo "[+] Enumerating SMB shares using smbclient..."
 SHARES_FILE="shares_$TARGET.txt"
 
 case "$AUTH" in
@@ -54,47 +60,67 @@ case "$AUTH" in
     full)  smbclient -L "//$TARGET" -U "$USER%$PASS" | tee "$SHARES_FILE" ;;
 esac
 
-# Extract share names only (Disk type)
 SHARES=( $(grep "Disk" "$SHARES_FILE" | awk '{print $1}') )
 
 
 # ------------------------------------------------------------
-# FUNCTION: Print Share List
+# RUN SMBMAP and store results
+# ------------------------------------------------------------
+echo
+echo "[+] Running smbmap for permission analysis..."
+SMBMAP_FILE="smbmap_$TARGET.txt"
+
+if [[ "$AUTH" == "anon" ]]; then
+    smbmap -H "$TARGET" -u "" -p "" | tee "$SMBMAP_FILE"
+elif [[ "$AUTH" == "blank" ]]; then
+    smbmap -H "$TARGET" -u "$USER" -p "" | tee "$SMBMAP_FILE"
+else
+    smbmap -H "$TARGET" -u "$USER" -p "$PASS" | tee "$SMBMAP_FILE"
+fi
+
+
+# ------------------------------------------------------------
+# FUNCTION: Print share list + smbmap permissions
 # ------------------------------------------------------------
 print_share_list() {
     echo
-    echo "=========== AVAILABLE SMB SHARES ==========="
+    echo "========== AVAILABLE SMB SHARES + PERMISSIONS =========="
+
     local i=1
     for share in "${SHARES[@]}"; do
-        echo "  $i) $share"
+        PERM=$(grep -E "^$share[[:space:]]" "$SMBMAP_FILE" | awk '{print $2}')
+        if [[ -z "$PERM" ]]; then
+            PERM="UNKNOWN"
+        fi
+        echo "  $i) $share    [Access: $PERM]"
         ((i++))
     done
-    echo "============================================"
+
+    echo "========================================================"
     echo
 }
 
 
 # ------------------------------------------------------------
-# MAIN SELECTION LOOP — ALWAYS PRINT THE SHARE LIST
+# MAIN LOOP — ALWAYS SHOW SHARE LIST
 # ------------------------------------------------------------
 while true; do
     print_share_list
 
-    read -p "[+] Choose share number to login (or type 'exit'): " selection
+    read -p "[+] Choose share number to login (or 'exit'): " selection
 
     if [[ "$selection" == "exit" ]]; then
         echo "[+] Exiting."
         break
     fi
 
-    # Validate input
+    # Validate
     if ! [[ "$selection" =~ ^[0-9]+$ ]]; then
-        echo "[!] Invalid input: must be a number or 'exit'"
+        echo "[!] Invalid input."
         continue
     fi
 
     index=$((selection - 1))
-
     if [[ $index -lt 0 || $index -ge ${#SHARES[@]} ]]; then
         echo "[!] Invalid share number."
         continue
@@ -102,7 +128,7 @@ while true; do
 
     SHARE="${SHARES[$index]}"
     echo "--------------------------------------------------"
-    echo "[+] Testing share: $SHARE"
+    echo "[+] Testing access: $SHARE"
 
     # Build commands
     if [[ "$AUTH" == "anon" ]]; then
@@ -123,7 +149,6 @@ while true; do
     if eval $TEST_CMD >/dev/null 2>&1; then
         echo "[+] ACCESS GRANTED → $SHARE"
 
-        # Print helpful download command
         echo
         echo "=================================================="
         echo " READY-TO-USE RECURSIVE DOWNLOAD COMMAND "
@@ -132,25 +157,23 @@ while true; do
         echo "=================================================="
         echo
 
-        echo "[+] Opening SMB session for $SHARE"
-        echo "[+] Type 'exit' inside the session to logout and return to the menu."
+        echo "[+] Opening interactive SMB session."
+        echo "[+] Type 'exit' to logout and return to the menu."
         echo "--------------------------------------------------"
 
-        # SMB interactive session
+        # Run smbclient
         eval "$LOGIN_CMD"
 
         echo "--------------------------------------------------"
-        echo "[+] Logged out of $SHARE — returning to main menu."
-        echo
+        echo "[+] Logged out of $SHARE — returning to menu."
 
     else
         echo "[-] ACCESS DENIED → $SHARE"
         echo "[!] Try another share."
     fi
-
 done
 
 echo
 echo "=================================================="
-echo "[+] Script complete. Goodbye!"
+echo "[+] Finished. Goodbye!"
 echo "=================================================="
