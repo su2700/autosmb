@@ -1,10 +1,14 @@
 #!/bin/bash
 
 # =====================================================================
-#  SMB Share Enumerator + smbmap Integration + Interactive Login Loop
+#  SMB Enumeration Toolkit:
+#   - smbclient
+#   - smbmap
+#   - NetExec (nxc smb)
+#   + Interactive login loop
 # =====================================================================
 
-echo "=== SMB SHARE ENUM + LOGIN SELECTOR (v12 with smbmap) ==="
+echo "=== SMB ENUM + nxc + LOGIN SELECTOR (v13) ==="
 read -p "[+] Enter target IP: " TARGET
 
 echo
@@ -21,25 +25,24 @@ AUTH=""
 
 case "$MODE" in
     1)
-        echo "[+] Using anonymous authentication."
+        echo "[+] Using anonymous login."
         AUTH="anon"
-        SMB_USER=""
-        SMB_PASS=""
+        SMB_U=""
+        SMB_P=""
         ;;
     2)
         read -p "[+] Username: " USER
-        echo "[+] Using blank password for '$USER'"
         AUTH="blank"
-        SMB_USER="$USER"
-        SMB_PASS=""
+        SMB_U="$USER"
+        SMB_P=""
         ;;
     3)
         read -p "[+] Username: " USER
         read -s -p "[+] Password: " PASS
         echo
         AUTH="full"
-        SMB_USER="$USER"
-        SMB_PASS="$PASS"
+        SMB_U="$USER"
+        SMB_P="$PASS"
         ;;
     *)
         echo "[!] Invalid selection."
@@ -48,26 +51,26 @@ case "$MODE" in
 esac
 
 
-# ------------------------------------------------------------
-# ENUMERATE SHARES (smbclient)
-# ------------------------------------------------------------
-echo "[+] Enumerating SMB shares using smbclient..."
-SHARES_FILE="shares_$TARGET.txt"
+# =====================================================================
+# STEP 1 — smbclient ENUMERATION
+# =====================================================================
+echo "[+] Enumerating SMB shares with smbclient..."
+SMBCLIENT_FILE="smbclient_$TARGET.txt"
 
 case "$AUTH" in
-    anon)  smbclient -L "//$TARGET" -N | tee "$SHARES_FILE" ;;
-    blank) smbclient -L "//$TARGET" -U "$USER%" | tee "$SHARES_FILE" ;;
-    full)  smbclient -L "//$TARGET" -U "$USER%$PASS" | tee "$SHARES_FILE" ;;
+    anon)  smbclient -L "//$TARGET" -N | tee "$SMBCLIENT_FILE" ;;
+    blank) smbclient -L "//$TARGET" -U "$USER%" | tee "$SMBCLIENT_FILE" ;;
+    full)  smbclient -L "//$TARGET" -U "$USER%$PASS" | tee "$SMBCLIENT_FILE" ;;
 esac
 
-SHARES=( $(grep "Disk" "$SHARES_FILE" | awk '{print $1}') )
+SHARES=( $(grep "Disk" "$SMBCLIENT_FILE" | awk '{print $1}') )
 
 
-# ------------------------------------------------------------
-# RUN SMBMAP and store results
-# ------------------------------------------------------------
+# =====================================================================
+# STEP 2 — smbmap (permissions, RW, NO ACCESS)
+# =====================================================================
 echo
-echo "[+] Running smbmap for permission analysis..."
+echo "[+] Running smbmap..."
 SMBMAP_FILE="smbmap_$TARGET.txt"
 
 if [[ "$AUTH" == "anon" ]]; then
@@ -79,12 +82,47 @@ else
 fi
 
 
-# ------------------------------------------------------------
+# =====================================================================
+# STEP 3 — NetExec SMB Deep Info
+# =====================================================================
+echo
+echo "[+] Running NetExec (nxc) for extended SMB intelligence..."
+
+mkdir -p nxc_results
+NX_BASE="nxc_results/nxc_$TARGET"
+
+if [[ "$AUTH" == "anon" ]]; then
+    NX_AUTH="-u '' -p ''"
+elif [[ "$AUTH" == "blank" ]]; then
+    NX_AUTH="-u '$USER' -p ''"
+else
+    NX_AUTH="-u '$USER' -p '$PASS'"
+fi
+
+#--------------- RUN ALL NX COMMANDS --------------------
+
+echo "[+] nxc smb general info..."
+eval nxc smb $TARGET $NX_AUTH | tee "${NX_BASE}_general.txt"
+
+echo "[+] nxc smb shares..."
+eval nxc smb $TARGET $NX_AUTH --shares | tee "${NX_BASE}_shares.txt"
+
+echo "[+] nxc smb groups..."
+eval nxc smb $TARGET $NX_AUTH --groups | tee "${NX_BASE}_groups.txt"
+
+echo "[+] nxc smb users..."
+eval nxc smb $TARGET $NX_AUTH --users | tee "${NX_BASE}_users.txt"
+
+echo "[+] nxc smb sessions..."
+eval nxc smb $TARGET $NX_AUTH --sessions | tee "${NX_BASE}_sessions.txt"
+
+
+# =====================================================================
 # FUNCTION: Print share list + smbmap permissions
-# ------------------------------------------------------------
+# =====================================================================
 print_share_list() {
     echo
-    echo "========== AVAILABLE SMB SHARES + PERMISSIONS =========="
+    echo "========== SMB SHARES + PERMISSIONS =========="
 
     local i=1
     for share in "${SHARES[@]}"; do
@@ -92,37 +130,37 @@ print_share_list() {
         if [[ -z "$PERM" ]]; then
             PERM="UNKNOWN"
         fi
-        echo "  $i) $share    [Access: $PERM]"
+        echo "  $i) $share     [Access: $PERM]"
         ((i++))
     done
 
-    echo "========================================================"
+    echo "================================================"
     echo
 }
 
 
-# ------------------------------------------------------------
-# MAIN LOOP — ALWAYS SHOW SHARE LIST
-# ------------------------------------------------------------
+# =====================================================================
+# MAIN INTERACTIVE LOOP
+# =====================================================================
 while true; do
     print_share_list
 
-    read -p "[+] Choose share number to login (or 'exit'): " selection
+    read -p "[+] Choose share # to login (or 'exit'): " choice
 
-    if [[ "$selection" == "exit" ]]; then
-        echo "[+] Exiting."
+    if [[ "$choice" == "exit" ]]; then
+        echo "[+] Exiting script."
         break
     fi
 
-    # Validate
-    if ! [[ "$selection" =~ ^[0-9]+$ ]]; then
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
         echo "[!] Invalid input."
         continue
     fi
 
-    index=$((selection - 1))
+    index=$((choice - 1))
+
     if [[ $index -lt 0 || $index -ge ${#SHARES[@]} ]]; then
-        echo "[!] Invalid share number."
+        echo "[!] Out-of-range number."
         continue
     fi
 
@@ -130,50 +168,46 @@ while true; do
     echo "--------------------------------------------------"
     echo "[+] Testing access: $SHARE"
 
-    # Build commands
+
+    # Build test + login commands
     if [[ "$AUTH" == "anon" ]]; then
-        TEST_CMD="smbclient //$TARGET/$SHARE -N -c exit"
-        LOGIN_CMD="smbclient //$TARGET/$SHARE -N"
-        DL_CMD="smbclient //$TARGET/$SHARE -N -c \"recurse ON; prompt OFF; mget *\""
+        TEST="smbclient //$TARGET/$SHARE -N -c exit"
+        LOGIN="smbclient //$TARGET/$SHARE -N"
+        DL="smbclient //$TARGET/$SHARE -N -c \"recurse ON; prompt OFF; mget *\""
     elif [[ "$AUTH" == "blank" ]]; then
-        TEST_CMD="smbclient //$TARGET/$SHARE -U $USER% -c exit"
-        LOGIN_CMD="smbclient //$TARGET/$SHARE -U $USER%"
-        DL_CMD="smbclient //$TARGET/$SHARE -U $USER% -c \"recurse ON; prompt OFF; mget *\""
+        TEST="smbclient //$TARGET/$SHARE -U $USER% -c exit"
+        LOGIN="smbclient //$TARGET/$SHARE -U $USER%"
+        DL="smbclient //$TARGET/$SHARE -U $USER% -c \"recurse ON; prompt OFF; mget *\""
     else
-        TEST_CMD="smbclient //$TARGET/$SHARE -U $USER%$PASS -c exit"
-        LOGIN_CMD="smbclient //$TARGET/$SHARE -U $USER%$PASS"
-        DL_CMD="smbclient //$TARGET/$SHARE -U $USER%$PASS -c \"recurse ON; prompt OFF; mget *\""
+        TEST="smbclient //$TARGET/$SHARE -U $USER%$PASS -c exit"
+        LOGIN="smbclient //$TARGET/$SHARE -U $USER%$PASS"
+        DL="smbclient //$TARGET/$SHARE -U $USER%$PASS -c \"recurse ON; prompt OFF; mget *\""
     fi
 
     # Test login
-    if eval $TEST_CMD >/dev/null 2>&1; then
+    if eval $TEST >/dev/null 2>&1; then
         echo "[+] ACCESS GRANTED → $SHARE"
-
         echo
         echo "=================================================="
-        echo " READY-TO-USE RECURSIVE DOWNLOAD COMMAND "
+        echo " RECURSIVE DOWNLOAD COMMAND (copy/paste):"
         echo "=================================================="
-        echo "$DL_CMD"
+        echo "$DL"
         echo "=================================================="
         echo
 
-        echo "[+] Opening interactive SMB session."
-        echo "[+] Type 'exit' to logout and return to the menu."
+        echo "[+] Starting SMB interactive session..."
+        echo "[+] Type 'exit' to logout and return to menu."
         echo "--------------------------------------------------"
-
-        # Run smbclient
-        eval "$LOGIN_CMD"
-
+        eval "$LOGIN"
         echo "--------------------------------------------------"
-        echo "[+] Logged out of $SHARE — returning to menu."
+        echo "[+] Logged out — returning to menu."
 
     else
         echo "[-] ACCESS DENIED → $SHARE"
-        echo "[!] Try another share."
     fi
 done
 
 echo
 echo "=================================================="
-echo "[+] Finished. Goodbye!"
+echo "[+] Finished. nxc results saved in /nxc_results/"
 echo "=================================================="
